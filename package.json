@@ -1,0 +1,62 @@
+{
+  "name": "termssh-mcp",
+  "license": "MIT",
+  "version": "1.5.0",
+  "description": "Terminal-first SSH MCP server for interactive remote access, file upload, and automation.",
+  "type": "module",
+  "bin": {
+    "termssh-mcp": "build/index.js"
+  },
+  "scripts": {
+    "prepare": "npm run build",
+    "build": "tsc && shx chmod +x build/*.js",
+    "inspect": "npx @modelcontextprotocol/inspector node build/index.js",
+    "test": "cross-env TERMSSH_MCP_DISABLE_MAIN=1 vitest --run",
+    "test:watch": "cross-env TERMSSH_MCP_DISABLE_MAIN=1 vitest",
+    "coverage": "cross-env TERMSSH_MCP_DISABLE_MAIN=1 vitest --run --coverage"
+  },
+  "files": [
+    "build"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.5",
+    "ssh2": "^1.17.0",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "@types/ssh2": "^1.15.5",
+    "cross-env": "^7.0.3",
+    "shx": "^0.4.0",
+    "testcontainers": "^11.7.0",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "homepage": "https://github.com/rayss868/termssh-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rayss868/termssh-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rayss868/termssh-mcp/issues"
+  },
+  "keywords": [
+    "termssh",
+    "ssh",
+    "mcp",
+    "terminal",
+    "model-context-protocol",
+    "server",
+    "windows",
+    "linux",
+    "automation",
+    "remote",
+    "typescript"
+  ],
+  "author": "rayss",
+  "engines": {
+    "node": ">=18"
+  }
+}
