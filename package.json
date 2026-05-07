@@ -1,7 +1,7 @@
 {
   "name": "termssh-mcp",
   "license": "MIT",
-  "version": "1.5.0",
+  "version": "1.0.0",
   "description": "Terminal-first SSH MCP server for interactive remote access, file upload, and automation.",
   "type": "module",
   "bin": {
