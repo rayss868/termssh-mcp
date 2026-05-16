@@ -20,6 +20,7 @@ export interface ResolvedSshConfigSource {
   source: 'vault' | 'cli';
   sshConfig: SSHConfig;
   vaultPath?: string;
+  accountName?: string;
 }
 
 const DEFAULT_VAULT_PATH = './vault.json';
@@ -49,6 +50,25 @@ function validateVaultFile(vault: VaultFile): void {
   if (!vault.accounts || typeof vault.accounts !== 'object') {
     throw new Error('Vault file must contain an accounts object');
   }
+}
+
+function getVaultAccountNames(vault: VaultFile): string[] {
+  return Object.keys(vault.accounts);
+}
+
+function resolveSelectedAccountName(vault: VaultFile, requestedAccountName?: string | null): string {
+  const accountNames = getVaultAccountNames(vault);
+  if (accountNames.length === 0) {
+    throw new Error('Vault file does not contain any accounts');
+  }
+
+  if (requestedAccountName && requestedAccountName.trim() !== '') {
+    return requestedAccountName;
+  }
+
+  throw new Error(
+    `Vault account selection is required. Available accounts: ${accountNames.join(', ')}. Provide the account parameter. Use list-accounts to inspect available account names.`
+  );
 }
 
 function validateVaultAccount(accountName: string, account: VaultAccount | undefined): asserts account is VaultAccount {
@@ -100,26 +120,37 @@ function toSshConfigFromCli(argvConfig: Record<string, string | null>, defaultTi
   };
 }
 
+export async function loadVaultFileFromSources(options: {
+  argvConfig: Record<string, string | null>;
+  loadVaultFile?: (vaultPath: string) => Promise<VaultFile>;
+}): Promise<{ vault: VaultFile; vaultPath: string }> {
+  const vaultPath = options.argvConfig.vault ?? DEFAULT_VAULT_PATH;
+  const loadVaultFile = options.loadVaultFile ?? defaultLoadVaultFile;
+  const vault = await loadVaultFile(vaultPath);
+  validateVaultFile(vault);
+  return { vault, vaultPath };
+}
+
 export async function resolveSshConfigFromSources(options: {
   argvConfig: Record<string, string | null>;
   defaultTimeout: number;
+  accountName?: string;
   loadVaultFile?: (vaultPath: string) => Promise<VaultFile>;
 }): Promise<ResolvedSshConfigSource> {
   const vaultPath = options.argvConfig.vault ?? DEFAULT_VAULT_PATH;
-  const loadVaultFile = options.loadVaultFile ?? defaultLoadVaultFile;
 
   try {
-    const vault = await loadVaultFile(vaultPath);
-    validateVaultFile(vault);
+    const { vault } = await loadVaultFileFromSources(options);
 
-    const activeAccountName = vault.activeAccount;
-    const activeAccount = vault.accounts[activeAccountName];
-    validateVaultAccount(activeAccountName, activeAccount);
+    const selectedAccountName = resolveSelectedAccountName(vault, options.accountName ?? options.argvConfig.account);
+    const selectedAccount = vault.accounts[selectedAccountName];
+    validateVaultAccount(selectedAccountName, selectedAccount);
 
     return {
       source: 'vault',
-      sshConfig: await toSshConfigFromVault(activeAccount, options.defaultTimeout),
+      sshConfig: await toSshConfigFromVault(selectedAccount, options.defaultTimeout),
       vaultPath,
+      accountName: selectedAccountName,
     };
   } catch (error) {
     const cliConfig = toSshConfigFromCli(options.argvConfig, options.defaultTimeout);

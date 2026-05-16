@@ -237,12 +237,18 @@ npm install -g termssh-mcp
 
 ### Vault mode
 
-Vault mode lets you store multiple SSH accounts in one JSON file and choose a single active target with `activeAccount`.
+Vault mode lets you store multiple SSH accounts in one JSON file and choose the target account per MCP tool call.
 
 #### Vault CLI parameter
 - `vault` — path to a vault JSON file
 
-If [`--vault`](src/vault.ts:108) is provided, startup resolves the active account from the vault. If no vault is provided, [`TermSSH MCP`](README.md) falls back to direct CLI config.
+If [`--vault`](src/vault.ts:108) is provided, startup resolves accounts from the vault. If no vault is provided, [`TermSSH MCP`](README.md) falls back to direct CLI config.
+
+#### Account selection behavior
+- MCP tools now expose an `account` parameter in the built tool schema
+- when vault mode is enabled, `account` should be set to one of the keys under [`accounts`](termssh-mcp-vault.json:254)
+- if `account` is omitted, runtime now fails with a clear error instead of silently choosing an account
+- this was verified against live SSH MCP runtime: no `account` → reject, valid `account` → connect successfully
 
 #### Example vault file
 
@@ -294,6 +300,21 @@ File: [`termssh-mcp-vault.json`](termssh-mcp-vault.json)
   }
 }
 ```
+
+### MCP tool call example with account
+
+```json
+{
+  "account": "production",
+  "cwd": "/var/www/app",
+  "platformHint": "linux",
+  "multiSession": true
+}
+```
+
+### MCP behavior when account is omitted
+
+If you call a vault-backed tool without `account`, runtime rejects the call and tells you to choose one of the configured account names.
 
 ### Direct CLI example
 

@@ -18,7 +18,8 @@ Thank you for your interest in contributing to [`TermSSH MCP`](README.md).
 - Keep public MCP tool behavior clearly documented.
 - Update tests and documentation whenever behavior changes.
 - If you change connection startup behavior, also update vault and direct-CLI examples in [`README.md`](README.md).
-- If you change SSH auth handling, verify both direct `--key` usage and vault-based `key` file loading in [`src/vault.ts`](src/vault.ts:73).
+- If you change SSH auth handling, verify both direct `--key` usage and vault-based `key` file loading in [`src/vault.ts`](src/vault.ts:90).
+- If you change vault account-selection behavior, update the MCP tool-call examples and the documented `account` requirement in [`README.md`](README.md:280).
 
 ## Issues and Bugs
 
