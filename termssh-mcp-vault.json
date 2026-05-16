@@ -1,0 +1,11 @@
+{
+  "activeAccount": "rayhan-vps",
+  "accounts": {
+    "rayhan-vps": {
+      "host": "34.101.43.155",
+      "port": 22,
+      "user": "rayhan",
+      "key": "C:\\Users\\rayss\\AppData\\Roaming\\Code\\User\\globalStorage\\kilocode.kilo-code\\settings\\ssh-mcp-rayhan.key"
+    }
+  }
+}

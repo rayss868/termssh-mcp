@@ -1,4 +1,5 @@
-// Added for testing purposes, requires docker compose to run
+// Example local MCP config for development/testing.
+// You can use either direct CLI credentials or the recommended vault mode.
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
@@ -7,10 +8,7 @@
       "command": [
         "node",
         "build/index.js",
-        "--host=127.0.0.1",
-        "--port=2222",
-        "--user=test",
-        "--password=secret",
+        "--vault=./termssh-mcp-vault.json",
         "--timeout=60000"
       ],
       "enabled": true,

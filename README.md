@@ -215,22 +215,87 @@ npm install -g termssh-mcp
 
 ## ⚙ Configuration
 
-### Required CLI parameters
+[`TermSSH MCP`](README.md) supports two configuration modes:
+
+1. **Direct CLI flags** — good for quick tests or a single server
+2. **Vault file** — recommended for real usage, especially when you want multiple VPS accounts and one active target
+
+### Direct CLI parameters
+
+#### Required
 - `host` — hostname or IP address of the remote machine
 - `user` — SSH username
 
-### Optional CLI parameters
+#### Optional
 - `port` — SSH port, default `22`
 - `password` — SSH password
-- `key` — path to a private SSH key
+- `key` — path to a private SSH key file
 - `sudoPassword` — optional password for sudo-oriented workflows
 - `suPassword` — optional password for `su`-based elevation
 - `timeout` — SSH ready timeout in milliseconds, default `60000`
 - `maxChars` — command-length validation limit, default `1000`; use `none` or `0` for unlimited mode
 
+### Vault mode
+
+Vault mode lets you store multiple SSH accounts in one JSON file and choose a single active target with `activeAccount`.
+
+#### Vault CLI parameter
+- `vault` — path to a vault JSON file
+
+If [`--vault`](src/vault.ts:108) is provided, startup resolves the active account from the vault. If no vault is provided, [`TermSSH MCP`](README.md) falls back to direct CLI config.
+
+#### Example vault file
+
+File: [`termssh-mcp-vault.json`](termssh-mcp-vault.json)
+
+```json
+{
+  "activeAccount": "production",
+  "accounts": {
+    "production": {
+      "host": "1.2.3.4",
+      "port": 22,
+      "user": "root",
+      "key": "C:\\keys\\id_ed25519"
+    },
+    "staging": {
+      "host": "5.6.7.8",
+      "port": 22,
+      "user": "ubuntu",
+      "password": "example-password"
+    }
+  }
+}
+```
+
+#### Important key behavior
+- In vault mode, `key` must point to a **private key file path**
+- [`toSshConfigFromVault()`](src/vault.ts:73) reads that file and passes the **key contents** to [`ssh2`](src/ssh-connection-manager.ts:2)
+- This fixes the private-key parsing issue that happens if a file path is sent directly as [`privateKey`](src/core.ts:9)
+
 ---
 
-## 🧩 MCP configuration example
+## 🧩 MCP configuration examples
+
+### Recommended: vault-based MCP config
+
+```json
+{
+  "mcpServers": {
+    "termssh-mcp": {
+      "command": "node",
+      "args": [
+        "build/index.js",
+        "--vault=./termssh-mcp-vault.json",
+        "--timeout=30000",
+        "--maxChars=none"
+      ]
+    }
+  }
+}
+```
+
+### Direct CLI example
 
 ```json
 {
@@ -253,7 +318,7 @@ npm install -g termssh-mcp
 }
 ```
 
-### SSH key example
+### Direct CLI with SSH key
 
 ```json
 {
@@ -266,7 +331,26 @@ npm install -g termssh-mcp
         "--",
         "--host=example.com",
         "--user=root",
-        "--key=/path/to/private/key"
+        "--key=/path/to/private/key",
+        "--timeout=30000"
+      ]
+    }
+  }
+}
+```
+
+### Real local-project vault pattern
+
+```json
+{
+  "mcpServers": {
+    "ssh-mcp": {
+      "command": "node",
+      "args": [
+        "D:/All_project/own/AI_Coder/MCP_Tools/ssh-mcp/build/index.js",
+        "--vault=D:/All_project/own/AI_Coder/MCP_Tools/ssh-mcp/termssh-mcp-vault.json",
+        "--timeout=1200000",
+        "--maxChars=50000"
       ]
     }
   }
@@ -277,10 +361,16 @@ npm install -g termssh-mcp
 
 ## 🤖 Claude Code example
 
-Register the server in Claude Code:
+Register the server in Claude Code with direct credentials:
 
 ```bash
 claude mcp add --transport stdio termssh-mcp -- npx -y termssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
+```
+
+Register the server in Claude Code with a vault file:
+
+```bash
+claude mcp add --transport stdio termssh-mcp -- node build/index.js --vault=./termssh-mcp-vault.json --timeout=120000 --maxChars=none
 ```
 
 With SSH key authentication:
@@ -294,6 +384,19 @@ With extended timeout:
 ```bash
 claude mcp add --transport stdio termssh-mcp -- npx -y termssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --timeout=120000 --maxChars=none
 ```
+
+---
+
+## ✅ Verified vault workflow
+
+The vault flow has been verified against a live SSH connection:
+- [`termssh-mcp-vault.json`](termssh-mcp-vault.json) loaded successfully
+- [`resolveSshConfigFromSources()`](src/vault.ts:103) resolved the active account correctly
+- interactive SSH session startup via [`terminal-start`](src/index.ts:133) succeeded after fixing key-file loading
+
+This means the recommended production path is now:
+
+> **MCP config → `--vault=...` → active account selection → interactive terminal session**
 
 ---
 
