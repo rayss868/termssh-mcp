@@ -65,6 +65,17 @@ export function sanitizeCommand(command: string): string {
 }
 
 const connectionManagers = new Map<string, SSHConnectionManager>();
+const sessionAccountBindings = new Map<string, string>();
+
+function resolveAccountForSession(sessionId: string, account?: string): string | undefined {
+  if (account) {
+    sessionAccountBindings.set(sessionId, account);
+    return account;
+  }
+  const cached = sessionAccountBindings.get(sessionId);
+  if (cached !== undefined) return cached;
+  return undefined;
+}
 
 function getConnectionManagerCacheKey(source: 'vault' | 'cli', accountName?: string): string {
   if (source === 'vault') {
@@ -177,6 +188,9 @@ server.tool(
   async ({ account, cwd, shell, platformHint, elevated, cols, rows, env, multiSession }) => {
     const manager = await getOrCreateConnectionManager(account);
     const session = await manager.startInteractiveSession({ cwd, shell, platformHint, elevated, cols, rows, env, multiSession });
+    if (session && session.sessionId) {
+      sessionAccountBindings.set(session.sessionId, account ?? 'cli:default');
+    }
     return createTextResult(JSON.stringify(session, null, 2));
   }
 );
@@ -188,17 +202,20 @@ server.tool(
   'Set appendNewline=false ONLY for special cases (e.g. typing a password at a prompt). ' +
   'This tool does NOT wait for output — call terminal_read (with sinceSequence / ' +
   'waitForMs) afterwards to fetch results. ' +
-  'REQUIRED: pass `account` (vault account name) when the server runs with --vault; ' +
-  'the `account` value MUST MATCH the one used in terminal_start. Without it the ' +
-  'request fails. Omit `account` only when the server runs with --host/--user.',
+  'AUTO-BINDING: once the session is opened with terminal_start, you usually do NOT ' +
+  'need to pass `account` here — the MCP reuses the account that opened the session. ' +
+  'Pass `account` explicitly only to override the binding when working with multiple ' +
+  'vault accounts in parallel. terminal_start itself still requires `account` in ' +
+  '--vault mode.',
   {
-    account: z.string().optional().describe('(Often required) Vault account name. REQUIRED with --vault, omit only with --host/--user. Must match the account used when the session was created.'),
+    account: z.string().optional().describe('(Optional) Vault account name. If omitted, the account bound to this sessionId at terminal_start time is reused automatically. Pass explicitly to override the binding when working with multiple vault accounts.'),
     sessionId: z.string().describe('Interactive session id returned by terminal_start.'),
     input: z.string().describe('Text to send to the session stdin. A newline is appended automatically unless appendNewline=false.'),
     appendNewline: z.boolean().optional().describe('(Optional, default true) Append a newline at the end. Set false ONLY when you need to send input without executing it (e.g. a password).'),
   },
   async ({ account, sessionId, input, appendNewline }) => {
-    const manager = await getOrCreateConnectionManager(account);
+    const resolvedAccount = resolveAccountForSession(sessionId, account);
+    const manager = await getOrCreateConnectionManager(resolvedAccount);
     const result = await manager.writeInteractiveSession(sessionId, input, appendNewline ?? true);
     return createTextResult(JSON.stringify(result, null, 2));
   }
@@ -212,18 +229,20 @@ server.tool(
   'prompt without busy-looping. maxChars truncates to the last N characters. Maximum ' +
   'per-session buffer is 200,000 chars; on overflow the response sets truncated=true. ' +
   'Check the `closed` and `exitCode` fields to detect an exited shell. ' +
-  'REQUIRED: pass `account` (vault account name) when the server runs with --vault; ' +
-  'the `account` value MUST MATCH the one used in terminal_start. Without it the ' +
-  'request fails. Omit `account` only when the server runs with --host/--user.',
+  'AUTO-BINDING: once the session is opened with terminal_start, you usually do NOT ' +
+  'need to pass `account` here — the MCP reuses the account that opened the session. ' +
+  'Pass `account` explicitly only to override the binding when working with multiple ' +
+  'vault accounts in parallel.',
   {
-    account: z.string().optional().describe('(Often required) Vault account name. REQUIRED with --vault, omit only with --host/--user. Must match the account used when the session was created.'),
+    account: z.string().optional().describe('(Optional) Vault account name. If omitted, the account bound to this sessionId at terminal_start time is reused automatically. Pass explicitly to override the binding when working with multiple vault accounts.'),
     sessionId: z.string().describe('Interactive session id.'),
     sinceSequence: z.number().int().min(0).optional().describe('(Optional, default 0) Return only output whose sequence is greater than this value. Use the nextSequence from a previous response.'),
     maxChars: z.number().int().positive().optional().describe('(Optional) Trim the returned output to the last maxChars characters. Useful for very long outputs.'),
     waitForMs: z.number().int().min(0).max(5000).optional().describe('(Optional, 0–5000) Delay the read by this many milliseconds. Useful for soft-realtime polling without busy-looping.'),
   },
   async ({ account, sessionId, sinceSequence, maxChars, waitForMs }) => {
-    const manager = await getOrCreateConnectionManager(account);
+    const resolvedAccount = resolveAccountForSession(sessionId, account);
+    const manager = await getOrCreateConnectionManager(resolvedAccount);
     if (waitForMs && waitForMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, waitForMs));
     }
@@ -237,16 +256,19 @@ server.tool(
   'Resize an in-progress interactive terminal session (cols × rows). Sends TIOCSWINSZ ' +
   'to the remote PTY so full-screen apps (vim, htop, less) redraw correctly. Does ' +
   'NOT discard already-buffered output. ' +
-  'REQUIRED: pass `account` (vault account name) when the server runs with --vault; ' +
-  'without it the request fails. Omit `account` only when the server runs with --host/--user.',
+  'AUTO-BINDING: once the session is opened with terminal_start, you usually do NOT ' +
+  'need to pass `account` here — the MCP reuses the account that opened the session. ' +
+  'Pass `account` explicitly only to override the binding when working with multiple ' +
+  'vault accounts in parallel.',
   {
-    account: z.string().optional().describe('(Often required) Vault account name. REQUIRED with --vault, omit only with --host/--user.'),
+    account: z.string().optional().describe('(Optional) Vault account name. If omitted, the account bound to this sessionId at terminal_start time is reused automatically. Pass explicitly to override the binding when working with multiple vault accounts.'),
     sessionId: z.string().describe('Interactive session id.'),
     cols: z.number().int().positive().describe('New terminal width in columns (must be > 0).'),
     rows: z.number().int().positive().describe('New terminal height in rows (must be > 0).'),
   },
   async ({ account, sessionId, cols, rows }) => {
-    const manager = await getOrCreateConnectionManager(account);
+    const resolvedAccount = resolveAccountForSession(sessionId, account);
+    const manager = await getOrCreateConnectionManager(resolvedAccount);
     const result = manager.resizeInteractiveSession(sessionId, cols, rows);
     return createTextResult(JSON.stringify(result, null, 2));
   }
@@ -259,16 +281,19 @@ server.tool(
   '/tmp/termssh-mcp/<id>.json on the remote is LEFT IN PLACE — a server-side watcher ' +
   'cleans it up and sends SIGTERM within ~10 minutes. This tool is idempotent: ' +
   'calling it twice does not error. ' +
-  'REQUIRED: pass `account` (vault account name) when the server runs with --vault; ' +
-  'the `account` value MUST MATCH the one used in terminal_start. Without it the ' +
-  'request fails. Omit `account` only when the server runs with --host/--user.',
+  'AUTO-BINDING: once the session is opened with terminal_start, you usually do NOT ' +
+  'need to pass `account` here — the MCP reuses the account that opened the session. ' +
+  'Pass `account` explicitly only to override the binding when working with multiple ' +
+  'vault accounts in parallel.',
   {
-    account: z.string().optional().describe('(Often required) Vault account name. REQUIRED with --vault, omit only with --host/--user. Must match the account used when the session was created.'),
+    account: z.string().optional().describe('(Optional) Vault account name. If omitted, the account bound to this sessionId at terminal_start time is reused automatically. Pass explicitly to override the binding when working with multiple vault accounts.'),
     sessionId: z.string().describe('Interactive session id to close.'),
   },
   async ({ account, sessionId }) => {
-    const manager = await getOrCreateConnectionManager(account);
+    const resolvedAccount = resolveAccountForSession(sessionId, account);
+    const manager = await getOrCreateConnectionManager(resolvedAccount);
     const result = manager.closeInteractiveSession(sessionId);
+    sessionAccountBindings.delete(sessionId);
     return createTextResult(JSON.stringify(result, null, 2));
   }
 );
