@@ -24,7 +24,7 @@
 
 ## ✨ Why TermSSH MCP
 
-### Latest release: v1.1.0
+### Latest release: v1.6.0
 
 This release completes the SFTP file-operation workflow:
 - Download remote files with overwrite disabled by default.
