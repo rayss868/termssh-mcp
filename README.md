@@ -24,6 +24,20 @@
 
 ## ✨ Why TermSSH MCP
 
+### Latest release: v1.1.0
+
+This release completes the SFTP file-operation workflow:
+- Download remote files with overwrite disabled by default.
+- List remote directory entries and inspect file metadata.
+- Create/remove remote directories, delete files, and rename paths.
+- Set remote POSIX permissions and modification times.
+- Recursively upload and download directories, skipping symbolic links and enforcing a configurable `maxFiles` limit (default `10000`).
+- Use temporary files for transfers and opt in explicitly to overwriting existing destinations.
+
+It also adds MCP tools for these operations, improves tool descriptions, and requires an explicit `account` selection in vault mode while binding the selected account to interactive terminal sessions.
+
+Verification: `npm run build` succeeds and `npm test` passes all 36 tests. SFTP operations were covered by unit tests with mocks; a live SFTP server transfer was not part of release verification.
+
 Most SSH tooling for AI workflows is built around **run command → get output → done**.
 
 That falls apart when the real task is interactive:
