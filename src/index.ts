@@ -5,7 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { sanitizeCommand as sanitizeCommandWithLimit } from './core.js';
 import { SSHConnectionManager } from './ssh-connection-manager.js';
-import { resolveSshConfigFromSources } from './vault.js';
+import { loadVaultFileFromSources, resolveSshConfigFromSources } from './vault.js';
 
 const isTestMode = process.env.TERMSSH_MCP_TEST === '1';
 const isCliEnabled = process.env.TERMSSH_MCP_DISABLE_MAIN !== '1';
@@ -119,10 +119,73 @@ const server = new McpServer({
 });
 
 server.tool(
+  'list_accounts',
+  'List the vault accounts this MCP server can connect with, plus the currently active ' +
+  'account. Each entry reports the account name, host, port, SSH user, auth method ' +
+  '(password and/or key), and whether su/sudo elevation is configured — no secrets are ' +
+  'returned. Call this tool FIRST whenever you are unsure which `account` name to pass to ' +
+  'any other tool, or to detect which mode the server runs in. How to read the result: ' +
+  'mode="vault" with a non-empty accounts list means the server runs with --vault and the ' +
+  '`account` parameter is REQUIRED on every other tool (upload_file, upload_content, ' +
+  'terminal_start, send_command, terminal_read, terminal_resize, terminal_close); ' +
+  'mode="cli" with an empty accounts list means no vault file was found (server runs with ' +
+  '--host/--user) and `account` may be omitted everywhere; mode="vault-error" means the ' +
+  'vault file exists but is invalid — see the note field. Account names are CASE-SENSITIVE ' +
+  'and must match the vault JSON keys exactly. Pass vaultPath only to inspect a specific ' +
+  'vault file instead of the one the server was started with.',
+  {
+    vaultPath: z.string().optional().describe('(Optional) Path to a vault JSON file to inspect instead of the server-configured vault path.'),
+  },
+  async ({ vaultPath }) => {
+    const effectiveArgvConfig = vaultPath
+      ? { ...argvConfig, vault: vaultPath }
+      : argvConfig;
+    try {
+      const { vault, vaultPath: resolvedVaultPath } = await loadVaultFileFromSources({
+        argvConfig: effectiveArgvConfig,
+      });
+      const accounts = Object.entries(vault.accounts).map(([name, acc]) => ({
+        name,
+        active: name === vault.activeAccount,
+        host: acc.host,
+        port: acc.port ?? 22,
+        user: acc.user,
+        auth: [acc.password ? 'password' : null, acc.key ? 'key' : null]
+          .filter(Boolean)
+          .join('+') || 'none',
+        elevation: Boolean(acc.suPassword || acc.sudoPassword),
+      }));
+      return createTextResult(JSON.stringify({
+        mode: 'vault',
+        vaultPath: resolvedVaultPath,
+        activeAccount: vault.activeAccount,
+        accounts,
+      }, null, 2));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return createTextResult(JSON.stringify({
+        mode: /ENOENT/i.test(message) ? 'cli' : 'vault-error',
+        vaultPath: vaultPath ?? argvConfig.vault ?? './vault.json',
+        accounts: [],
+        note: message,
+      }, null, 2));
+    }
+  }
+);
+
+server.tool(
   'upload_file',
   'Upload a single file from the local MCP host disk to the remote SSH server via SFTP. ' +
-  'Use this when the source already exists on disk. For small in-memory payloads (text, ' +
-  'JSON, or base64-encoded binary) use upload_content instead. ' +
+  'Use this when the source file already exists on disk and only needs to be moved. For ' +
+  'small in-memory payloads (text, JSON, base64-encoded binary) use upload_content instead. ' +
+  'Behavior notes: localPath is read from the MCP HOST filesystem, not the remote server; ' +
+  'remotePath must be an absolute path on the remote server; if the remote file already ' +
+  'exists and overwrite is not true, the request FAILS — set overwrite=true to replace it; ' +
+  'createDirectories=true creates missing parent directories recursively; mode is a POSIX ' +
+  'OCTAL string such as 0644 or 0755 (not decimal). ' +
+  'Common errors: "Vault account selection is required" → pass `account` (or call ' +
+  'list_accounts to discover names); "already exists" → retry with overwrite=true; local ' +
+  'path not readable → fix localPath on the MCP host, not on the remote. ' +
   'REQUIRED: pass `account` (vault account name) when the server runs with --vault; ' +
   'without it the request fails with "Vault account selection is required". ' +
   'Omit `account` only when the server runs with --host/--user.',
@@ -145,7 +208,16 @@ server.tool(
   'upload_content',
   'Upload content directly (in-memory) to the remote SSH server via SFTP, without ' +
   'touching the local disk. Ideal for small payloads: config snippets, code, JSON, ' +
-  'or base64-encoded binary. The source is the `content` field, not a file on disk. ' +
+  'one-liner scripts, or base64-encoded binary. The source is the `content` field — ' +
+  'there is no localPath and nothing is read from the MCP host disk. ' +
+  'Behavior notes: use encoding="utf8" for plain text; for binary data (images, PDFs, ' +
+  'executables, archives) base64-encode the payload and pass encoding="base64" — never ' +
+  'send raw binary; remotePath must be absolute on the remote server; if the remote file ' +
+  'already exists and overwrite is not true, the request FAILS — set overwrite=true to ' +
+  'replace it; createDirectories=true creates missing parent directories recursively; ' +
+  'mode is a POSIX OCTAL string such as 0644 (not decimal). ' +
+  'Common errors: "Vault account selection is required" → pass `account` (or call ' +
+  'list_accounts to discover names); "already exists" → retry with overwrite=true. ' +
   'REQUIRED: pass `account` (vault account name) when the server runs with --vault; ' +
   'without it the request fails. Omit `account` only when the server runs with --host/--user.',
   {
@@ -165,15 +237,101 @@ server.tool(
 );
 
 server.tool(
+  'download_file',
+  'Download a single file from the remote SSH server to the local MCP host using SFTP. ' +
+  'Use this when the remote file should be saved to local disk. localPath refers to the MCP ' +
+  'host, not the remote server. Existing local files are preserved unless overwrite=true. ' +
+  'Parent directories are created automatically. Pass account when using --vault.',
+  {
+    account: z.string().optional().describe('(Optional) Vault account name. Required with --vault.'),
+    remotePath: z.string().describe('Absolute path to a remote file.'),
+    localPath: z.string().describe('Destination path on the MCP host. Parent directories are created if needed.'),
+    overwrite: z.boolean().optional().describe('(Optional, default false) Replace the local file if it already exists.'),
+  },
+  async ({ account, remotePath, localPath, overwrite }) => {
+    const manager = await getOrCreateConnectionManager(account);
+    const result = await manager.downloadRemoteFile({ remotePath, localPath, overwrite });
+    return createTextResult(JSON.stringify(result, null, 2));
+  }
+);
+
+server.tool(
+  'list_remote_directory',
+  'List entries in a remote directory over SFTP. Returns each entry name, type, size, ' +
+  'and modification time. Use this to inspect remote files before downloading or uploading. ' +
+  'Pass account when using --vault.',
+  {
+    account: z.string().optional().describe('(Optional) Vault account name. Required with --vault.'),
+    remotePath: z.string().describe('Absolute path to the remote directory.'),
+  },
+  async ({ account, remotePath }) => {
+    const manager = await getOrCreateConnectionManager(account);
+    const result = await manager.listRemoteDirectory(remotePath);
+    return createTextResult(JSON.stringify(result, null, 2));
+  }
+);
+
+server.tool(
+  'get_remote_file_info',
+  'Get metadata for a remote file or directory using SFTP, including type, size, ' +
+  'permissions mode, and modification time. Pass account when using --vault.',
+  {
+    account: z.string().optional().describe('(Optional) Vault account name. Required with --vault.'),
+    remotePath: z.string().describe('Absolute path to the remote file or directory.'),
+  },
+  async ({ account, remotePath }) => {
+    const manager = await getOrCreateConnectionManager(account);
+    const result = await manager.getRemoteFileInfo(remotePath);
+    return createTextResult(JSON.stringify(result, null, 2));
+  }
+);
+
+server.tool('create_remote_directory', 'Create a remote directory. Set recursive=true to create missing parents.', {
+  account: z.string().optional(), remotePath: z.string(), recursive: z.boolean().optional(),
+}, async ({ account, remotePath, recursive }) => createTextResult(JSON.stringify(await (await getOrCreateConnectionManager(account)).createRemoteDirectory(remotePath, recursive), null, 2)));
+
+server.tool('remove_remote_directory', 'Remove an empty remote directory. This operation is destructive.', {
+  account: z.string().optional(), remotePath: z.string(),
+}, async ({ account, remotePath }) => createTextResult(JSON.stringify(await (await getOrCreateConnectionManager(account)).removeRemoteDirectory(remotePath), null, 2)));
+
+server.tool('delete_remote_file', 'Permanently delete a remote file. Does not remove directories.', {
+  account: z.string().optional(), remotePath: z.string(),
+}, async ({ account, remotePath }) => createTextResult(JSON.stringify(await (await getOrCreateConnectionManager(account)).deleteRemoteFile(remotePath), null, 2)));
+
+server.tool('rename_remote_path', 'Rename or move a remote file or directory. Existing destination requires overwrite=true.', {
+  account: z.string().optional(), remotePath: z.string(), newRemotePath: z.string(), overwrite: z.boolean().optional(),
+}, async ({ account, remotePath, newRemotePath, overwrite }) => createTextResult(JSON.stringify(await (await getOrCreateConnectionManager(account)).renameRemotePath({ remotePath, newRemotePath, overwrite }), null, 2)));
+
+server.tool('set_remote_file_metadata', 'Set remote file permissions and/or modification time.', {
+  account: z.string().optional(), remotePath: z.string(), mode: z.string().optional(), modifiedAt: z.string().optional(),
+}, async ({ account, remotePath, mode, modifiedAt }) => createTextResult(JSON.stringify(await (await getOrCreateConnectionManager(account)).setRemoteFileMetadata({ remotePath, mode, modifiedAt }), null, 2)));
+
+server.tool('upload_directory', 'Recursively upload regular files from a local directory to a remote directory. Symlinks are skipped.', {
+  account: z.string().optional(), localPath: z.string(), remotePath: z.string(), overwrite: z.boolean().optional(), mode: z.string().optional(), maxFiles: z.number().int().positive().optional(),
+}, async ({ account, localPath, remotePath, overwrite, mode, maxFiles }) => createTextResult(JSON.stringify(await (await getOrCreateConnectionManager(account)).uploadRemoteDirectory({ localPath, remotePath, overwrite, mode, maxFiles }), null, 2)));
+
+server.tool('download_directory', 'Recursively download regular files from a remote directory to the MCP host. Symlinks are skipped.', {
+  account: z.string().optional(), remotePath: z.string(), localPath: z.string(), overwrite: z.boolean().optional(), maxFiles: z.number().int().positive().optional(),
+}, async ({ account, remotePath, localPath, overwrite, maxFiles }) => createTextResult(JSON.stringify(await (await getOrCreateConnectionManager(account)).downloadRemoteDirectory({ remotePath, localPath, overwrite, maxFiles }), null, 2)));
+
+server.tool(
   'terminal_start',
   'Open an interactive shell session on the remote SSH server and start buffering ' +
-  'its output. After this call, use terminal_read to view output and send_command to ' +
-  'send input. End the session with terminal_close. By default, an active session ' +
-  'matching the same account/cwd/user/host is REUSED; set multiSession=true to force ' +
-  'a new one. Sessions auto-close after 10 minutes idle. Automatic su-elevation ' +
-  'requires suPassword in the config plus elevated=true (ignored on Windows). ' +
+  'its output. Standard workflow: 1) terminal_start → 2) send_command to send input → ' +
+  '3) terminal_read (with sinceSequence/waitForMs) to fetch output → 4) repeat 2-3 as ' +
+  'needed → 5) terminal_close when done. The response includes a sessionId — pass it to ' +
+  'send_command, terminal_read, terminal_resize and terminal_close. ' +
+  'Behavior notes: by default an active session matching the same account/cwd/user/host ' +
+  'is REUSED; set multiSession=true to force a new one; cwd, shell and env are applied ' +
+  'as bootstrap AFTER the shell starts, so a bootstrap failure does not mean the shell ' +
+  'itself failed; sessions auto-close after 10 minutes idle (each send_command refreshes ' +
+  'the idle timer); automatic su elevation requires suPassword in the vault account plus ' +
+  'elevated=true (ignored on Windows); platformHint controls newline handling and ' +
+  'bootstrap target — "windows" targets cmd.exe. ' +
   'REQUIRED: pass `account` (vault account name) when the server runs with --vault; ' +
-  'without it the request fails. Omit `account` only when the server runs with --host/--user.',
+  'without it the request fails. Omit `account` only when the server runs with ' +
+  '--host/--user. The session is auto-bound to this account, so later calls for the same ' +
+  'sessionId usually do not need `account`.',
   {
     account: z.string().optional().describe('(Often required) Vault account name. REQUIRED with --vault, omit only with --host/--user.'),
     cwd: z.string().optional().describe('(Optional) Working directory to `cd` into after the shell starts.'),
@@ -198,10 +356,13 @@ server.tool(
 server.tool(
   'send_command',
   'Send input to an existing interactive terminal session (created via terminal_start). ' +
+  'This is for interactive sessions only — there is no one-shot exec tool; to run a single ' +
+  'command: terminal_start, then send_command here, then terminal_read. ' +
   'appendNewline defaults to true so the shell executes the command immediately. ' +
   'Set appendNewline=false ONLY for special cases (e.g. typing a password at a prompt). ' +
   'This tool does NOT wait for output — call terminal_read (with sinceSequence / ' +
-  'waitForMs) afterwards to fetch results. ' +
+  'waitForMs) afterwards to fetch results. Each call refreshes the session idle timer, ' +
+  'postponing the 10-minute auto-close. ' +
   'AUTO-BINDING: once the session is opened with terminal_start, you usually do NOT ' +
   'need to pass `account` here — the MCP reuses the account that opened the session. ' +
   'Pass `account` explicitly only to override the binding when working with multiple ' +
@@ -228,7 +389,10 @@ server.tool(
   'duplicates between calls. waitForMs (0–5000ms) is useful for waiting on the next ' +
   'prompt without busy-looping. maxChars truncates to the last N characters. Maximum ' +
   'per-session buffer is 200,000 chars; on overflow the response sets truncated=true. ' +
-  'Check the `closed` and `exitCode` fields to detect an exited shell. ' +
+  'Check the `closed` and `exitCode` fields to detect an exited shell. Typical polling ' +
+  'loop: send_command → terminal_read with waitForMs=500-2000 and sinceSequence=<the ' +
+  'nextSequence from the previous response> → repeat until the shell prompt reappears ' +
+  'or closed=true. ' +
   'AUTO-BINDING: once the session is opened with terminal_start, you usually do NOT ' +
   'need to pass `account` here — the MCP reuses the account that opened the session. ' +
   'Pass `account` explicitly only to override the binding when working with multiple ' +
@@ -254,8 +418,9 @@ server.tool(
 server.tool(
   'terminal_resize',
   'Resize an in-progress interactive terminal session (cols × rows). Sends TIOCSWINSZ ' +
-  'to the remote PTY so full-screen apps (vim, htop, less) redraw correctly. Does ' +
-  'NOT discard already-buffered output. ' +
+  'to the remote PTY so full-screen apps (vim, htop, less) redraw correctly. Call this ' +
+  'after terminal_start and before running full-screen applications. Does NOT discard ' +
+  'already-buffered output and only affects the session PTY, not your local window. ' +
   'AUTO-BINDING: once the session is opened with terminal_start, you usually do NOT ' +
   'need to pass `account` here — the MCP reuses the account that opened the session. ' +
   'Pass `account` explicitly only to override the binding when working with multiple ' +
@@ -277,9 +442,10 @@ server.tool(
 server.tool(
   'terminal_close',
   'Close an interactive terminal session on the MCP (client) side. The SSH stream ' +
-  'is ended and the session is removed from memory. The marker file at ' +
-  '/tmp/termssh-mcp/<id>.json on the remote is LEFT IN PLACE — a server-side watcher ' +
-  'cleans it up and sends SIGTERM within ~10 minutes. This tool is idempotent: ' +
+  'is ended and the session is removed from memory, along with its account binding. ' +
+  'Always call this when finished to avoid leaking sessions and idle timers. The marker ' +
+  'file at /tmp/termssh-mcp/<id>.json on the remote is LEFT IN PLACE — a server-side ' +
+  'watcher cleans it up and sends SIGTERM within ~10 minutes. This tool is idempotent: ' +
   'calling it twice does not error. ' +
   'AUTO-BINDING: once the session is opened with terminal_start, you usually do NOT ' +
   'need to pass `account` here — the MCP reuses the account that opened the session. ' +

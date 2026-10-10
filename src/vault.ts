@@ -67,7 +67,7 @@ function resolveSelectedAccountName(vault: VaultFile, requestedAccountName?: str
   }
 
   throw new Error(
-    `Vault account selection is required. Available accounts: ${accountNames.join(', ')}. Provide the account parameter. Use list-accounts to inspect available account names.`
+    `Vault account selection is required. Available accounts: ${accountNames.join(', ')}. Provide the account parameter. Use list_accounts to inspect available account names.`
   );
 }
 

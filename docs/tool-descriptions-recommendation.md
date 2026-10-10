@@ -30,8 +30,8 @@ Almost every tool in this MCP exposes a string parameter `account` that selects 
 
 ## 0) `list-accounts` (helper tool — optional but strongly recommended)
 
-> **Note:** This tool is not yet registered in `src/index.ts`. Recommendation: add this
-> small tool so the AI can introspect vault accounts. Pseudocode:
+> **Note:** This tool is now registered in `src/index.ts` (as `list_accounts`).
+> The snippet below is kept for reference. Pseudocode:
 
 ```ts
 server.tool(

@@ -95,6 +95,12 @@ Focused MCP tools for terminal control and remote file delivery.
 - Managed terminal session reuse by default
 - Optional forced multi-session creation
 - Local file upload through SFTP
+- Remote file download to the MCP host through SFTP
+- Remote directory listing and file metadata inspection
+- Remote directory create/remove and file delete/rename operations
+- Recursive directory upload and download (regular files; symbolic links skipped)
+- Remote permission and modification-time updates
+- Atomic temporary-file transfers, explicit overwrite behavior, and transfer file-count limits
 - Direct text and base64 content upload
 - Terminal resize support
 - Linux and Windows SSH target support
@@ -124,6 +130,37 @@ Upload direct text or base64 content to the remote server.
 - `createDirectories` — create missing parent directories if needed
 - `overwrite` — replace an existing remote file if present
 - `mode` — optional POSIX mode such as `0644`
+
+### `download_file`
+Download a remote file to local disk on the MCP host. Parent directories are created automatically.
+
+**Parameters**
+- `remotePath` — absolute source path on the remote host
+- `localPath` — destination path on the MCP host
+- `overwrite` — replace an existing local file if true (default false)
+
+### `list_remote_directory`
+List a remote directory's entries, types, sizes, and modification times.
+
+**Parameters**
+- `remotePath` — absolute directory path on the remote host
+
+### `get_remote_file_info`
+Inspect a remote file or directory's type, size, permissions mode, and modification time.
+
+**Parameters**
+- `remotePath` — absolute path on the remote host
+
+### Directory and metadata tools
+
+- `create_remote_directory` — create one directory, or parents when `recursive=true`.
+- `remove_remote_directory` — remove an empty directory.
+- `delete_remote_file` — permanently delete a remote file.
+- `rename_remote_path` — move or rename a remote path; destination overwrite is opt-in.
+- `set_remote_file_metadata` — optionally set POSIX `mode` and/or `modifiedAt` (date string).
+- `upload_directory` / `download_directory` — recursively transfer regular files, skipping symbolic links. `maxFiles` limits file count (default 10000); overwrite is false by default.
+
+These tools accept `account` when connecting through vault mode; it is required in that mode.
 
 ### [`terminal-start`](src/index.ts:140)
 Start an interactive remote terminal session.

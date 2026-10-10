@@ -168,6 +168,6 @@ describe('resolveSshConfigFromSources', () => {
       argvConfig: {},
       defaultTimeout: 60000,
       loadVaultFile: async () => vault,
-    })).rejects.toThrow('Vault account selection is required. Available accounts: prod, staging. Provide the account parameter. Use list-accounts to inspect available account names.');
+    })).rejects.toThrow('Vault account selection is required. Available accounts: prod, staging. Provide the account parameter. Use list_accounts to inspect available account names.');
   });
 });

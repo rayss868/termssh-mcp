@@ -1,6 +1,8 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { Client, ClientChannel } from 'ssh2';
 import fs from 'fs/promises';
+import path from 'path';
+import { randomUUID } from 'crypto';
 import {
   type SSHConfig,
   sanitizePassword,
@@ -398,6 +400,51 @@ export class SSHConnectionManager {
     });
   }
 
+  private async sftpOperation(sftp: any, operation: string, remotePath: string, ...args: any[]): Promise<any> {
+    return new Promise((resolve, reject) => {
+      sftp[operation](remotePath, ...args, (error: any, result: any) => {
+        if (error) {
+          reject(new McpError(ErrorCode.InternalError, `SFTP ${operation} failed for ${remotePath}: ${error.message || error}`));
+          return;
+        }
+        resolve(result);
+      });
+    });
+  }
+
+  private async putRemoteFile(sftp: any, localPath: string, remotePath: string): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      sftp.fastPut(localPath, remotePath, (error: any) => error
+        ? reject(new McpError(ErrorCode.InternalError, `Failed to upload file to ${remotePath}: ${error.message || error}`))
+        : resolve());
+    });
+  }
+
+  private async getRemoteFile(sftp: any, remotePath: string, localPath: string): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      sftp.fastGet(remotePath, localPath, (error: any) => error
+        ? reject(new McpError(ErrorCode.InternalError, `Failed to download file from ${remotePath}: ${error.message || error}`))
+        : resolve());
+    });
+  }
+
+  private async replaceLocalFile(tempPath: string, localPath: string, overwrite: boolean): Promise<void> {
+    if (overwrite) {
+      await fs.rename(tempPath, localPath);
+      return;
+    }
+    try {
+      await fs.link(tempPath, localPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new McpError(ErrorCode.InvalidParams, `Local path already exists: ${localPath}`);
+      }
+      throw error;
+    } finally {
+      await fs.rm(tempPath, { force: true });
+    }
+  }
+
   private toIsoString(timestamp: number): string {
     return new Date(timestamp).toISOString();
   }
@@ -475,17 +522,16 @@ export class SSHConnectionManager {
         }
       }
 
-      await new Promise<void>((resolve, reject) => {
-        sftp.fastPut(localPath, remotePath, (err: any) => {
-          if (err) {
-            reject(new McpError(ErrorCode.InternalError, `Failed to upload file to ${remotePath}: ${err?.message || err}`));
-            return;
-          }
-          resolve();
-        });
-      });
-
-      await this.chmodRemote(sftp, remotePath, mode);
+      const tempRemotePath = `${remotePath}.termssh-${randomUUID()}.part`;
+      try {
+        await this.putRemoteFile(sftp, localPath, tempRemotePath);
+        await this.chmodRemote(sftp, tempRemotePath, mode);
+        if (existing) await this.sftpOperation(sftp, 'unlink', remotePath);
+        await this.sftpOperation(sftp, 'rename', tempRemotePath, remotePath);
+      } catch (error) {
+        await this.sftpOperation(sftp, 'unlink', tempRemotePath).catch(() => {});
+        throw error;
+      }
 
       return {
         remotePath,
@@ -521,8 +567,16 @@ export class SSHConnectionManager {
         }
       }
 
-      await this.writeRemoteBuffer(sftp, remotePath, contentBuffer);
-      await this.chmodRemote(sftp, remotePath, mode);
+      const tempRemotePath = `${remotePath}.termssh-${randomUUID()}.part`;
+      try {
+        await this.writeRemoteBuffer(sftp, tempRemotePath, contentBuffer);
+        await this.chmodRemote(sftp, tempRemotePath, mode);
+        if (existing) await this.sftpOperation(sftp, 'unlink', remotePath);
+        await this.sftpOperation(sftp, 'rename', tempRemotePath, remotePath);
+      } catch (error) {
+        await this.sftpOperation(sftp, 'unlink', tempRemotePath).catch(() => {});
+        throw error;
+      }
 
       return {
         remotePath,
@@ -530,6 +584,224 @@ export class SSHConnectionManager {
         overwritten: Boolean(existing),
         modeApplied: mode,
       };
+    });
+  }
+
+  async downloadRemoteFile(options: {
+    remotePath: string;
+    localPath: string;
+    overwrite?: boolean;
+  }): Promise<{ remotePath: string; localPath: string; bytesWritten: number; overwritten: boolean }> {
+    const remotePath = ensureNonEmptyPath(options.remotePath, 'remotePath');
+    const localPath = ensureNonEmptyPath(options.localPath, 'localPath');
+    const localStat = await fs.stat(localPath).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw new McpError(ErrorCode.InvalidParams, `localPath is not accessible: ${(error as Error).message}`);
+    });
+    if (localStat && !options.overwrite) {
+      throw new McpError(ErrorCode.InvalidParams, `Local path already exists: ${localPath}`);
+    }
+
+    return this.withSftp(async (sftp) => {
+      const remoteStat = await this.sftpStat(sftp, remotePath);
+      if (!remoteStat) {
+        throw new McpError(ErrorCode.InvalidParams, `Remote path does not exist: ${remotePath}`);
+      }
+      if (typeof remoteStat.isFile === 'function' && !remoteStat.isFile()) {
+        throw new McpError(ErrorCode.InvalidParams, `Remote path is not a file: ${remotePath}`);
+      }
+      await fs.mkdir(path.dirname(localPath), { recursive: true });
+      const tempPath = path.join(path.dirname(localPath), `.${path.basename(localPath)}.${randomUUID()}.part`);
+      try {
+        await this.getRemoteFile(sftp, remotePath, tempPath);
+        const downloaded = await fs.stat(tempPath);
+        await this.replaceLocalFile(tempPath, localPath, Boolean(options.overwrite));
+        return { remotePath, localPath, bytesWritten: downloaded.size, overwritten: Boolean(localStat) };
+      } catch (error) {
+        await fs.rm(tempPath, { force: true });
+        throw error;
+      }
+    });
+  }
+
+  async createRemoteDirectory(remotePath: string, recursive = false): Promise<{ remotePath: string; created: boolean }> {
+    remotePath = ensureNonEmptyPath(remotePath, 'remotePath');
+    return this.withSftp(async (sftp) => {
+      const existing = await this.sftpStat(sftp, remotePath);
+      if (existing) {
+        if (!existing.isDirectory()) throw new McpError(ErrorCode.InvalidParams, `Remote path exists and is not a directory: ${remotePath}`);
+        return { remotePath, created: false };
+      }
+      if (recursive) await this.ensureRemoteDirectoryExists(sftp, remotePath);
+      else await this.sftpOperation(sftp, 'mkdir', remotePath);
+      return { remotePath, created: true };
+    });
+  }
+
+  async removeRemoteDirectory(remotePath: string): Promise<{ remotePath: string; removed: true }> {
+    remotePath = ensureNonEmptyPath(remotePath, 'remotePath');
+    return this.withSftp(async (sftp) => {
+      await this.sftpOperation(sftp, 'rmdir', remotePath);
+      return { remotePath, removed: true };
+    });
+  }
+
+  async deleteRemoteFile(remotePath: string): Promise<{ remotePath: string; deleted: true }> {
+    remotePath = ensureNonEmptyPath(remotePath, 'remotePath');
+    return this.withSftp(async (sftp) => {
+      const attrs = await this.sftpStat(sftp, remotePath);
+      if (!attrs) throw new McpError(ErrorCode.InvalidParams, `Remote path does not exist: ${remotePath}`);
+      if (attrs.isDirectory()) throw new McpError(ErrorCode.InvalidParams, `Remote path is a directory; use remove_remote_directory: ${remotePath}`);
+      await this.sftpOperation(sftp, 'unlink', remotePath);
+      return { remotePath, deleted: true };
+    });
+  }
+
+  async renameRemotePath(options: { remotePath: string; newRemotePath: string; overwrite?: boolean }): Promise<{ remotePath: string; newRemotePath: string; overwritten: boolean }> {
+    const remotePath = ensureNonEmptyPath(options.remotePath, 'remotePath');
+    const newRemotePath = ensureNonEmptyPath(options.newRemotePath, 'newRemotePath');
+    return this.withSftp(async (sftp) => {
+      if (!await this.sftpStat(sftp, remotePath)) throw new McpError(ErrorCode.InvalidParams, `Remote path does not exist: ${remotePath}`);
+      const existing = await this.sftpStat(sftp, newRemotePath);
+      if (existing && !options.overwrite) throw new McpError(ErrorCode.InvalidParams, `Remote path already exists: ${newRemotePath}`);
+      if (existing) await this.sftpOperation(sftp, existing.isDirectory() ? 'rmdir' : 'unlink', newRemotePath);
+      await this.sftpOperation(sftp, 'rename', remotePath, newRemotePath);
+      return { remotePath, newRemotePath, overwritten: Boolean(existing) };
+    });
+  }
+
+  async setRemoteFileMetadata(options: { remotePath: string; mode?: string; modifiedAt?: string }): Promise<{ remotePath: string; modeApplied?: string; modifiedAt?: string }> {
+    const remotePath = ensureNonEmptyPath(options.remotePath, 'remotePath');
+    const mode = normalizeOptionalMode(options.mode);
+    const mtime = options.modifiedAt === undefined ? undefined : Math.floor(new Date(options.modifiedAt).getTime() / 1000);
+    if (mtime !== undefined && !Number.isFinite(mtime)) throw new McpError(ErrorCode.InvalidParams, 'modifiedAt must be a valid date string');
+    return this.withSftp(async (sftp) => {
+      if (mode) await this.chmodRemote(sftp, remotePath, mode);
+      if (mtime !== undefined) await this.sftpOperation(sftp, 'utimes', remotePath, mtime, mtime);
+      return { remotePath, modeApplied: mode, modifiedAt: options.modifiedAt };
+    });
+  }
+
+  async listRemoteDirectory(remotePath: string): Promise<{ remotePath: string; entries: Array<{ name: string; type: 'file' | 'directory' | 'symlink' | 'other'; size: number; modifiedAt: string }> }> {
+    remotePath = ensureNonEmptyPath(remotePath, 'remotePath');
+    return this.withSftp(async (sftp) => new Promise((resolve, reject) => {
+      sftp.readdir(remotePath, (error: Error | undefined, entries: any[]) => {
+        if (error) {
+          reject(new McpError(ErrorCode.InternalError, `Failed to list remote directory ${remotePath}: ${error.message}`));
+          return;
+        }
+        resolve({
+          remotePath,
+          entries: entries.map((entry) => ({
+            name: entry.filename,
+            type: entry.attrs.isDirectory() ? 'directory' : entry.attrs.isSymbolicLink() ? 'symlink' : entry.attrs.isFile() ? 'file' : 'other',
+            size: entry.attrs.size,
+            modifiedAt: new Date(entry.attrs.mtime * 1000).toISOString(),
+          })),
+        });
+      });
+    }));
+  }
+
+  async uploadRemoteDirectory(options: { localPath: string; remotePath: string; overwrite?: boolean; mode?: string; maxFiles?: number }): Promise<{ remotePath: string; filesUploaded: number; bytesWritten: number }> {
+    const localPath = ensureNonEmptyPath(options.localPath, 'localPath');
+    const remotePath = ensureNonEmptyPath(options.remotePath, 'remotePath');
+    const maxFiles = options.maxFiles ?? 10000;
+    if (!Number.isSafeInteger(maxFiles) || maxFiles < 1) throw new McpError(ErrorCode.InvalidParams, 'maxFiles must be a positive integer');
+    const rootStat = await fs.stat(localPath);
+    if (!rootStat.isDirectory()) throw new McpError(ErrorCode.InvalidParams, 'localPath must point to a directory');
+    return this.withSftp(async (sftp) => {
+      await this.ensureRemoteDirectoryExists(sftp, remotePath);
+      let filesUploaded = 0;
+      let bytesWritten = 0;
+      const walk = async (localDir: string, remoteDir: string): Promise<void> => {
+        for (const entry of await fs.readdir(localDir, { withFileTypes: true })) {
+          const source = path.join(localDir, entry.name);
+          const destination = `${remoteDir.replace(/[\\/]$/, '')}/${entry.name}`;
+          if (entry.isDirectory()) {
+            if (!await this.sftpStat(sftp, destination)) await this.sftpOperation(sftp, 'mkdir', destination);
+            await walk(source, destination);
+          } else if (entry.isFile()) {
+            filesUploaded++;
+            if (filesUploaded > maxFiles) throw new McpError(ErrorCode.InvalidParams, `Directory exceeds maxFiles (${maxFiles})`);
+            const existing = await this.sftpStat(sftp, destination);
+            if (existing && !options.overwrite) throw new McpError(ErrorCode.InvalidParams, `Remote path already exists: ${destination}`);
+            const temp = `${destination}.termssh-${randomUUID()}.part`;
+            try {
+              await this.putRemoteFile(sftp, source, temp);
+              await this.chmodRemote(sftp, temp, options.mode);
+              if (existing) await this.sftpOperation(sftp, 'unlink', destination);
+              await this.sftpOperation(sftp, 'rename', temp, destination);
+            } catch (error) {
+              await this.sftpOperation(sftp, 'unlink', temp).catch(() => {});
+              throw error;
+            }
+            bytesWritten += (await fs.stat(source)).size;
+          }
+        }
+      };
+      await walk(localPath, remotePath);
+      return { remotePath, filesUploaded, bytesWritten };
+    });
+  }
+
+  async downloadRemoteDirectory(options: { remotePath: string; localPath: string; overwrite?: boolean; maxFiles?: number }): Promise<{ remotePath: string; localPath: string; filesDownloaded: number; bytesWritten: number }> {
+    const remotePath = ensureNonEmptyPath(options.remotePath, 'remotePath');
+    const localPath = ensureNonEmptyPath(options.localPath, 'localPath');
+    const maxFiles = options.maxFiles ?? 10000;
+    if (!Number.isSafeInteger(maxFiles) || maxFiles < 1) throw new McpError(ErrorCode.InvalidParams, 'maxFiles must be a positive integer');
+    await fs.mkdir(localPath, { recursive: true });
+    return this.withSftp(async (sftp) => {
+      let filesDownloaded = 0;
+      let bytesWritten = 0;
+      const walk = async (remoteDir: string, localDir: string): Promise<void> => {
+        const entries: any[] = await new Promise((resolve, reject) => sftp.readdir(remoteDir, (error: any, result: any[]) => error ? reject(error) : resolve(result)));
+        for (const entry of entries) {
+          if (entry.filename === '.' || entry.filename === '..' || /[\\/]/.test(entry.filename)) {
+            throw new McpError(ErrorCode.InvalidParams, `Invalid remote directory entry name: ${entry.filename}`);
+          }
+          const remote = `${remoteDir.replace(/[\\/]$/, '')}/${entry.filename}`;
+          const local = path.join(localDir, entry.filename);
+          if (entry.attrs.isDirectory()) {
+            await fs.mkdir(local, { recursive: true });
+            await walk(remote, local);
+          } else if (entry.attrs.isFile()) {
+            filesDownloaded++;
+            if (filesDownloaded > maxFiles) throw new McpError(ErrorCode.InvalidParams, `Directory exceeds maxFiles (${maxFiles})`);
+            const exists = await fs.stat(local).then(() => true).catch((error) => error.code === 'ENOENT' ? false : Promise.reject(error));
+            if (exists && !options.overwrite) throw new McpError(ErrorCode.InvalidParams, `Local path already exists: ${local}`);
+            const temp = path.join(localDir, `.${entry.filename}.${randomUUID()}.part`);
+            try {
+              await this.getRemoteFile(sftp, remote, temp);
+              const stat = await fs.stat(temp);
+              await this.replaceLocalFile(temp, local, Boolean(options.overwrite));
+              bytesWritten += stat.size;
+            } catch (error) {
+              await fs.rm(temp, { force: true });
+              throw error;
+            }
+          }
+        }
+      };
+      await walk(remotePath, localPath);
+      return { remotePath, localPath, filesDownloaded, bytesWritten };
+    });
+  }
+
+  async getRemoteFileInfo(remotePath: string): Promise<{ remotePath: string; type: 'file' | 'directory' | 'symlink' | 'other'; size: number; mode: number; modifiedAt: string }> {
+    remotePath = ensureNonEmptyPath(remotePath, 'remotePath');
+    return this.withSftp(async (sftp) => {
+      const attrs = await new Promise<any>((resolve, reject) => {
+        sftp.stat(remotePath, (error: Error | undefined, result: any) => {
+          if (error) {
+            reject(new McpError(ErrorCode.InternalError, `Failed to stat remote path ${remotePath}: ${error.message}`));
+            return;
+          }
+          resolve(result);
+        });
+      });
+      const type = attrs.isDirectory() ? 'directory' : attrs.isSymbolicLink() ? 'symlink' : attrs.isFile() ? 'file' : 'other';
+      return { remotePath, type, size: attrs.size, mode: attrs.mode, modifiedAt: new Date(attrs.mtime * 1000).toISOString() };
     });
   }
 
