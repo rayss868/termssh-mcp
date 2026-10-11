@@ -141,3 +141,8 @@ build/
 # Local-only artifacts
 .memory/
 .sentrux/
+
+# Vault files contain SSH credentials — never commit them
+termssh-mcp-vault.json
+vault.json
+*.vault.json
